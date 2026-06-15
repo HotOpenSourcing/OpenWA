@@ -51,6 +51,10 @@ export default () => ({
     puppeteer: {
       headless: process.env.PUPPETEER_HEADLESS !== 'false',
       args: (process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox').split(','),
+      // Optional path to a system Chromium/Chrome binary. When unset, whatsapp-web.js
+      // uses Puppeteer's bundled Chromium. Required on hosts where the bundled binary
+      // is missing or incompatible (Alpine, ARM, custom base images).
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     },
     sessionDataPath: process.env.SESSION_DATA_PATH || './data/sessions',
   },
@@ -75,6 +79,18 @@ export default () => ({
       longTtl: parseInt(process.env.RATE_LIMIT_LONG_TTL || '3600000', 10),
       longLimit: parseInt(process.env.RATE_LIMIT_LONG_LIMIT || '1000', 10),
     },
+  },
+
+  // Security configuration
+  security: {
+    // Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For header
+    // may be trusted for client-IP resolution. Empty by default: X-Forwarded-For
+    // is ignored and the direct socket address is used, preventing spoofing of
+    // the API-key allowedIps whitelist.
+    trustedProxies: (process.env.TRUSTED_PROXIES || '')
+      .split(',')
+      .map(proxy => proxy.trim())
+      .filter(Boolean),
   },
 
   // Storage configuration

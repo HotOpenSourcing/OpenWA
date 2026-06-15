@@ -10,6 +10,23 @@ import { createLogger } from '../../common/services/logger.service';
 
 const API_KEY_FILE = join(process.cwd(), 'data', '.api-key');
 
+/**
+ * Resolves the API key to seed on first boot (when no keys exist yet).
+ * Precedence: an explicit `API_MASTER_KEY` always wins; otherwise a
+ * cryptographically random `owa_k1_` key is generated — the secure default,
+ * including in non-production. The legacy fixed `dev-admin-key` is used only when
+ * a developer explicitly opts in with `ALLOW_DEV_API_KEY=true`, never by default.
+ */
+export function resolveSeedApiKey(): string {
+  if (process.env.API_MASTER_KEY) {
+    return process.env.API_MASTER_KEY;
+  }
+  if (process.env.ALLOW_DEV_API_KEY === 'true') {
+    return 'dev-admin-key';
+  }
+  return `owa_k1_${randomBytes(32).toString('hex')}`;
+}
+
 @Injectable()
 export class AuthService implements OnModuleInit {
   private readonly logger = createLogger('AuthService');
@@ -26,9 +43,7 @@ export class AuthService implements OnModuleInit {
     let isNewKey = false;
 
     if (count === 0) {
-      // Use predictable key in development, random key in production
-      displayKey =
-        process.env.NODE_ENV === 'production' ? `owa_k1_${randomBytes(32).toString('hex')}` : 'dev-admin-key';
+      displayKey = resolveSeedApiKey();
 
       await this.seedApiKey(displayKey, 'Default Admin Key', ApiKeyRole.ADMIN);
       isNewKey = true;
@@ -173,8 +188,12 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('API key has expired');
     }
 
-    // Check IP whitelist
-    if (apiKey.allowedIps && apiKey.allowedIps.length > 0 && clientIp) {
+    // Check IP whitelist (fail closed: if a whitelist is configured but the client
+    // IP could not be determined, reject rather than silently skipping the check)
+    if (apiKey.allowedIps && apiKey.allowedIps.length > 0) {
+      if (!clientIp) {
+        throw new UnauthorizedException('Client IP could not be determined');
+      }
       if (!this.isIpAllowed(clientIp, apiKey.allowedIps)) {
         this.logger.warn(`IP not allowed: ${clientIp}`, {
           keyId: apiKey.id,

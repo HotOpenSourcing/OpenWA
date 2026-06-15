@@ -25,6 +25,85 @@ X-API-Key: your-api-key
 X-Request-ID: optional-tracking-id (recommended)
 ```
 
+### API Key Management
+
+OpenWA creates an initial admin API key on first run. The key is printed in the
+startup logs and written to:
+
+- `data/.api-key` for local development
+- `/app/data/.api-key` inside the API container for Docker deployments
+
+By default a random `owa_k1_...` admin key is generated on first run in all
+environments; set `ALLOW_DEV_API_KEY=true` to seed the well-known `dev-admin-key`
+for local development only. Use that admin key to create scoped keys for
+integrations. The full generated key is returned only once in the `apiKey`
+field of the create response.
+
+#### Create API Key
+
+```http
+POST /api/auth/api-keys
+```
+
+**Required role:** `admin`
+
+**Request Body:**
+```json
+{
+  "name": "Production Bot",
+  "role": "operator",
+  "allowedIps": ["192.168.1.10", "10.0.0.0/8"],
+  "allowedSessions": ["session-uuid-1"],
+  "expiresAt": "2027-12-31T23:59:59Z"
+}
+```
+
+Only `name` is required. `role` defaults to `operator`; valid roles are
+`admin`, `operator`, and `viewer`.
+
+**Example:**
+```bash
+curl -X POST http://localhost:2785/api/auth/api-keys \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "n8n Integration",
+    "role": "operator"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "2a8f41e3-3b9a-4a1d-b6d0-b9910df8f0be",
+    "name": "n8n Integration",
+    "keyPrefix": "owa_k1_abcd",
+    "role": "operator",
+    "isActive": true,
+    "usageCount": 0,
+    "createdAt": "2026-02-02T10:30:00.000Z",
+    "apiKey": "owa_k1_abcd1234..."
+  },
+  "meta": {
+    "timestamp": "2026-02-02T10:30:00.000Z"
+  }
+}
+```
+
+#### API Key Endpoints
+
+| Method | Endpoint | Description | Required role |
+|--------|----------|-------------|---------------|
+| `GET` | `/api/auth/api-keys` | List API keys | `admin` |
+| `POST` | `/api/auth/api-keys` | Create an API key | `admin` |
+| `GET` | `/api/auth/api-keys/:id` | Get API key details | `admin` |
+| `PUT` | `/api/auth/api-keys/:id` | Update API key metadata, role, IPs, sessions, or expiry | `admin` |
+| `DELETE` | `/api/auth/api-keys/:id` | Delete an API key | `admin` |
+| `POST` | `/api/auth/api-keys/:id/revoke` | Revoke an API key by setting it inactive | `admin` |
+| `POST` | `/api/auth/validate` | Validate the key in `X-API-Key` | Any key |
+
 ## 6.2 Response Format
 
 ### Success Response
@@ -497,7 +576,7 @@ POST /api/sessions/:sessionId/logout
 
 ```mermaid
 flowchart LR
-    A[Client] -->|POST| B[/messages/send-text]
+    A[Client] -->|POST| B["/messages/send-text"]
     B --> C{Validate}
     C -->|OK| D[Queue]
     D --> E[Send]
@@ -859,7 +938,157 @@ GET /api/sessions/:sessionId/chats/:chatId/messages
 
 ---
 
-### 6.4.3 Contacts
+#### Send Template Message
+
+Render a stored text template and send it as a regular text message. The
+template body (and optional header/footer) is rendered server-side by
+substituting `{{placeholder}}` tokens with the supplied `vars`. Rendering
+reuses the standard `send-text` path, so plugin hooks, message persistence, and
+delivery-status tracking behave identically to a direct text send.
+
+> **Scope (issue #69):** Only **Option B** — server-side text templates with
+> variable substitution — is supported. Interactive templates (buttons, list
+> messages, WhatsApp Business HSM / approved message templates) are **Option A**
+> and are **not supported** on the whatsapp-web.js engine.
+
+```http
+POST /api/sessions/:sessionId/messages/send-template
+```
+
+**Request Body:**
+```json
+{
+  "chatId": "628123456789@c.us",
+  "templateName": "order-confirmation",
+  "vars": {
+    "customer": "Alice",
+    "orderId": "1234"
+  }
+}
+```
+
+**Request Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `chatId` | string | Yes | Recipient chat ID |
+| `templateId` | string | Conditional | Template UUID. Provide either `templateId` or `templateName`. |
+| `templateName` | string | Conditional | Template name within the session. Provide either `templateId` or `templateName`. |
+| `vars` | object | No | Map of `{{placeholder}}` keys to substitution values. Unknown placeholders are left literal. |
+
+**Response (201 Created):**
+```json
+{
+  "success": true,
+  "data": {
+    "messageId": "true_628123456789@c.us_3EB0ABC123",
+    "timestamp": "2025-02-02T10:00:00.000Z"
+  }
+}
+```
+
+Returns `404 Not Found` when the session or the referenced template does not
+exist, and `400 Bad Request` when the session is not active.
+
+---
+
+### 6.4.3 Templates
+
+Server-side text message templates (issue #69, Option B). Templates are scoped
+to a session and rendered with `{{placeholder}}` substitution by the
+[Send Template Message](#send-template-message) endpoint. All endpoints require
+an API key with at least the `operator` role.
+
+> Interactive button / list / HSM templates (**Option A**) are out of scope on
+> the whatsapp-web.js engine and are not provided.
+
+#### Create Template
+
+```http
+POST /api/sessions/:sessionId/templates
+```
+
+**Request Body:**
+```json
+{
+  "name": "order-confirmation",
+  "body": "Hi {{customer}}, your order {{orderId}} has shipped.",
+  "header": "OpenWA Store",
+  "footer": "Reply STOP to unsubscribe."
+}
+```
+
+**Request Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Template name (max 100 chars), unique per session by convention |
+| `body` | string | Yes | Template body with `{{placeholder}}` tokens (max 4096 chars) |
+| `header` | string | No | Optional header, prepended to the rendered body |
+| `footer` | string | No | Optional footer, appended to the rendered body |
+
+When rendered, the header, body, and footer are joined with blank lines.
+
+**Response (201 Created):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "b1c2d3e4-f5a6-7890-bcde-f01234567890",
+    "sessionId": "sess_abc123",
+    "name": "order-confirmation",
+    "body": "Hi {{customer}}, your order {{orderId}} has shipped.",
+    "header": "OpenWA Store",
+    "footer": "Reply STOP to unsubscribe.",
+    "createdAt": "2025-02-02T10:00:00.000Z",
+    "updatedAt": "2025-02-02T10:00:00.000Z"
+  }
+}
+```
+
+---
+
+#### List Templates
+
+```http
+GET /api/sessions/:sessionId/templates
+```
+
+Returns all templates for the session, newest first.
+
+---
+
+#### Get Template
+
+```http
+GET /api/sessions/:sessionId/templates/:id
+```
+
+Returns `404 Not Found` when the template does not exist in the session.
+
+---
+
+#### Update Template
+
+```http
+PUT /api/sessions/:sessionId/templates/:id
+```
+
+**Request Body:** any subset of `name`, `body`, `header`, `footer`.
+
+---
+
+#### Delete Template
+
+```http
+DELETE /api/sessions/:sessionId/templates/:id
+```
+
+**Response:** `204 No Content`.
+
+---
+
+### 6.4.4 Contacts
 
 #### Get All Contacts
 
@@ -922,7 +1151,7 @@ GET /api/sessions/:sessionId/contacts/:contactId/profile-picture
 
 ---
 
-### 6.4.4 Groups
+### 6.4.5 Groups
 
 #### Get All Groups
 
@@ -996,7 +1225,7 @@ POST /api/sessions/:sessionId/groups
 
 ---
 
-### 6.4.5 Webhooks
+### 6.4.6 Webhooks
 
 #### Register Webhook
 
@@ -1053,7 +1282,7 @@ DELETE /api/sessions/:sessionId/webhooks/:webhookId
 
 ---
 
-### 6.4.6 Health
+### 6.4.7 Health
 
 #### Basic Health Check
 
